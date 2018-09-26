@@ -24,6 +24,9 @@
 #define ICMP_REPLY 0x00
 #define REQUEST 0x0001
 #define REPLY 0x0002
+#define SYN 0x2
+#define RST 0x4
+#define FIN 0x1
 
 struct ethernet_header
 {
@@ -59,7 +62,6 @@ struct ip_header
    uint16_t header_checksum;
    uint8_t source_ip[SENDER_IP];
    uint8_t destination_ip[TARGET_IP];
-
 } __attribute__((packed));
 
 struct icmp_header
@@ -76,13 +78,12 @@ struct tcp_header
    uint16_t destination_port;
    uint32_t sequence_number;
    uint32_t ack_num;
-   uint8_t data_offset_reserved_ns;
-   uint8_t cwr_ece_urg_ack_psh_rst_syn_fin;
+   uint16_t data_offset_reserved_ns_cwr_ece_urg_ack_psh_rst_syn_fin;
    uint16_t window_size;
-   uint16_t check_sum;
+   uint16_t checksum;
    uint16_t urgent_ptr;
 
-}
+} __attribute__((packed));
 
 void usage(char * argv)
 {
@@ -107,6 +108,8 @@ uint16_t ethernet(const u_char * pkt_data);
 void arp(const u_char * pkt_data);
 uint8_t ip(const u_char * pkt_data);
 void icmp(const u_char * pkt_data);
+void tcp(const u_char * pkt_data);
+void check_flag(uint32_t data, uint16_t flag);
 
 int main(int argc, char ** argv)
 {
@@ -160,6 +163,11 @@ void run(pcap_t * pcap_ptr)
       if(protocol == ICMP)
       {
          icmp(pkt_data);
+         protocol = -1;
+      }
+      else if(protocol == TCP)
+      {
+         tcp(pkt_data);
          protocol = -1;
       }
    }
@@ -270,5 +278,51 @@ void icmp(const u_char * pkt_data)
    else
    {
       printf("Unknown\n");
+   }
+}
+
+void tcp(const u_char * pkt_data)
+{
+   struct ip_header * iph = (struct ip_header *)(pkt_data
+      + sizeof(struct ethernet_header));
+   uint8_t ip_header_length = (iph->version_header_length & 0x0f) * 4;
+
+   struct tcp_header * tcph = (struct tcp_header *)(pkt_data
+      + sizeof(struct ethernet_header) + ip_header_length);
+
+   uint16_t data = ntohs(tcph->data_offset_reserved_ns_cwr_ece_urg_ack_psh_rst_syn_fin);
+
+   uint16_t * temp_ptr_tcph = (uint16_t *)temp_ptr_tcph;
+
+   uint16_t tcp_header_len = (data >> 12) * 4;
+   
+   uint16_t answer = in_cksum(temp_ptr_tcph, tcp_header_len);
+
+   printf("\n\tTCP Header\n");
+   printf("\t\tSource port: %d\n", ntohs(tcph->source_port));
+   printf("\t\tDest Port: %d\n", ntohs(tcph->destination_port));
+   printf("\t\tSequence Number: %d\n", ntohl(tcph->sequence_number));
+   printf("\t\tACK Number: %lu\n",  (long unsigned)ntohl(tcph->ack_num));
+   printf("\t\tSYN Flag: ");
+   check_flag(data, SYN);
+   printf("\t\tRST Flag: ");
+   check_flag(data, RST);
+   printf("\t\tFIN Flag: ");
+   check_flag(data, FIN);
+   printf("\t\tWindow Size: %d\n", ntohs(tcph->window_size));
+   printf("\t\tChecksum: ");
+   printf(" %x", tcph->checksum);
+   printf(" %x\n", ~answer);
+}
+
+void check_flag(uint32_t data, uint16_t flag)
+{
+   if((data & flag) == flag)
+   {
+      printf("Yes\n");
+   }
+   else
+   {
+      printf("No\n");
    }
 }
