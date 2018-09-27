@@ -27,6 +27,8 @@
 #define SYN 0x2
 #define RST 0x4
 #define FIN 0x1
+#define PSEUDO_HEADER 12 /*Pseudo header is 12 bytes*/
+
 
 struct ethernet_header
 {
@@ -85,6 +87,15 @@ struct tcp_header
 
 } __attribute__((packed));
 
+struct pseudo_header
+{
+   uint8_t source_ip[SENDER_IP];
+   uint8_t destination_ip[TARGET_IP];
+   uint8_t reserved;
+   uint8_t protocol;
+   uint16_t tcp_segment_length;
+} __attribute__((packed));
+
 void usage(char * argv)
 {
    printf("Usage : %s PCAP_FILE\n", argv);
@@ -106,10 +117,11 @@ pcap_t * open_file(char * f_name)
 void run(pcap_t * pcap_ptr);
 uint16_t ethernet(const u_char * pkt_data);
 void arp(const u_char * pkt_data);
-uint8_t ip(const u_char * pkt_data);
+uint8_t ip(const u_char * pkt_data, uint8_t * pseudo_header);
 void icmp(const u_char * pkt_data);
 void tcp(const u_char * pkt_data);
 void check_flag(uint32_t data, uint16_t flag);
+void tcp_checksum(struct ip_header * iph, struct tcp_header * tcph);
 
 int main(int argc, char ** argv)
 {
@@ -134,8 +146,10 @@ void run(pcap_t * pcap_ptr)
    struct pcap_pkthdr * pkt_header = NULL;
    
    uint32_t pkt_num = 0;
-   uint16_t type = 0;
    
+   uint16_t type = 0;
+
+   uint8_t pseudo_header[PSEUDO_HEADER];
    uint8_t protocol = -1;   
 
    while(pcap_next_ex(pcap_ptr, &pkt_header, &pkt_data) == 1)
@@ -153,7 +167,7 @@ void run(pcap_t * pcap_ptr)
       else if(type == IP)
       {
          printf("IP\n");
-         protocol = ip(pkt_data);
+         protocol = ip(pkt_data, pseudo_header);
       }
       else
       {
@@ -170,6 +184,7 @@ void run(pcap_t * pcap_ptr)
          tcp(pkt_data);
          protocol = -1;
       }
+      //break;
    }
 }
 
@@ -210,7 +225,8 @@ void arp(const u_char * pkt_data)
       inet_ntoa(*((struct in_addr *)(ah->trgt_ip))));
 }
 
-uint8_t ip(const u_char * pkt_data)
+
+uint8_t ip(const u_char * pkt_data, uint8_t * pseudo_header)
 {
    struct ip_header * iph = (struct ip_header *)(pkt_data
       + sizeof(struct ethernet_header));
@@ -218,6 +234,7 @@ uint8_t ip(const u_char * pkt_data)
    uint16_t * temp_ptr_iph = (uint16_t *)iph;
 
    uint8_t header_length = (iph->version_header_length & 0x0f) * 4;
+
    printf("\n\tIP Header\n");
    //printf("\t\tTOS: 0x%x\n", iph->ds_ecn >> 2);
    printf("\t\tTOS: 0x%x\n", iph->ds_ecn);
@@ -266,6 +283,7 @@ void icmp(const u_char * pkt_data)
       + sizeof(struct ethernet_header) + ip_header_length);
 
    printf("\n\tICMP Header\n");
+   
    printf("\t\tType: ");
    if(ih->type == ICMP_REQUEST)
    {
@@ -292,17 +310,11 @@ void tcp(const u_char * pkt_data)
 
    uint16_t data = ntohs(tcph->data_offset_reserved_ns_cwr_ece_urg_ack_psh_rst_syn_fin);
 
-   uint16_t * temp_ptr_tcph = (uint16_t *)temp_ptr_tcph;
-
-   uint16_t tcp_header_len = (data >> 12) * 4;
-   
-   uint16_t answer = in_cksum(temp_ptr_tcph, tcp_header_len);
-
    printf("\n\tTCP Header\n");
    printf("\t\tSource port: %d\n", ntohs(tcph->source_port));
    printf("\t\tDest Port: %d\n", ntohs(tcph->destination_port));
-   printf("\t\tSequence Number: %d\n", ntohl(tcph->sequence_number));
-   printf("\t\tACK Number: %lu\n",  (long unsigned)ntohl(tcph->ack_num));
+   printf("\t\tSequence Number: %u\n", ntohl(tcph->sequence_number));
+   printf("\t\tACK Number: %u\n",  ntohl(tcph->ack_num));
    printf("\t\tSYN Flag: ");
    check_flag(data, SYN);
    printf("\t\tRST Flag: ");
@@ -311,8 +323,68 @@ void tcp(const u_char * pkt_data)
    check_flag(data, FIN);
    printf("\t\tWindow Size: %d\n", ntohs(tcph->window_size));
    printf("\t\tChecksum: ");
-   printf(" %x", tcph->checksum);
-   printf(" %x\n", ~answer);
+   tcp_checksum(iph, tcph);
+   
+}
+
+void tcp_checksum(struct ip_header * iph, struct tcp_header * tcph)
+{
+   struct pseudo_header ph;
+   
+   uint16_t data = ntohs(tcph->data_offset_reserved_ns_cwr_ece_urg_ack_psh_rst_syn_fin);
+   uint16_t tcp_header_len = (data >> 12) * 4;
+   uint16_t answer = 0;
+   uint16_t * cs_ptr = (uint16_t *)&ph;
+
+   int i = 0;
+
+   uint16_t temp[5000];
+
+   ph.reserved = 0;
+   
+   memcpy(ph.source_ip, iph->source_ip, SENDER_IP);
+   
+   memcpy(ph.destination_ip, iph->destination_ip, TARGET_IP);
+
+   ph.protocol = iph->protocol;
+   ph.tcp_segment_length = htons(tcp_header_len);//size of the tcp header + what follows the tcp header
+
+   memcpy(temp, &ph, sizeof(struct pseudo_header));
+   /*
+   printf("ph.tcp_segment_length %d %x", ntohs(ph.tcp_segment_length),ntohs(ph.tcp_segment_length));
+   
+   while(i < 6)
+   {
+      printf("\n%x\n\n", temp[i]);
+      i++;
+   }
+   */
+   
+   cs_ptr = (uint16_t *)tcph;
+   memcpy((temp + sizeof(struct pseudo_header)/2), cs_ptr, tcp_header_len);
+
+   i = 0;
+   while(i < sizeof(struct pseudo_header)/2 + tcp_header_len/2)
+   {
+      printf("\n%x\n\n", temp[i]);
+      i++;
+   }
+   
+   printf("sizeof(struct pseudo_header)/2+ tcp_header_len/2 %lu\n",sizeof(struct pseudo_header)/2+ tcp_header_len/2);
+   
+   answer = in_cksum(temp, sizeof(struct pseudo_header)+ tcp_header_len); 
+   //answer = in_cksum(temp, 20);
+   //printf("\nanswer : %x\n\n", answer);
+   if(answer == 0)
+   {
+      printf("Correct");
+   }
+   else
+   {
+      printf("Incorrect");
+   } 
+   printf("(0x%x)\n", tcph->checksum);
+
 }
 
 void check_flag(uint32_t data, uint16_t flag)
