@@ -35,6 +35,7 @@
 #define FIN 0x1
 #define PSEUDO_HEADER 12
 #define MIN_SIZE_PACKET 60 /*after 4 bytes have been stripped off*/
+#define MAX_ARR_SIZE 5000
 
 struct ethernet_header
 {
@@ -133,10 +134,10 @@ uint16_t ethernet(const u_char * pkt_data);
 void arp(const u_char * pkt_data);
 uint8_t ip(const u_char * pkt_data, uint8_t * pseudo_header);
 void icmp(const u_char * pkt_data);
-void tcp(const u_char * pkt_data, uint16_t * cs_arr, bpf_u_int32 len);
+void tcp(const u_char * pkt_data, uint16_t * cs_arr);
 void check_flag(uint32_t data, uint16_t flag);
 void tcp_checksum(struct ip_header * iph, struct tcp_header * tcph, 
-   uint16_t len, uint16_t * cs_arr);
+   uint16_t * cs_arr);
 void print_src_port(uint16_t port);
 void udp(const u_char * pkt_data);
 
@@ -169,7 +170,7 @@ void run(pcap_t * pcap_ptr)
    uint8_t pseudo_header[PSEUDO_HEADER];
    uint8_t protocol = -1;   
 
-   uint16_t cs_arr[5000];
+   uint16_t cs_arr[MAX_ARR_SIZE];
 
    while(pcap_next_ex(pcap_ptr, &pkt_header, &pkt_data) == 1)
    {
@@ -200,7 +201,7 @@ void run(pcap_t * pcap_ptr)
       }
       else if(protocol == TCP)
       {
-         tcp(pkt_data, cs_arr, pkt_header->len);
+         tcp(pkt_data, cs_arr);
          protocol = -1;
       }
       else if(protocol == UDP)
@@ -323,7 +324,7 @@ void icmp(const u_char * pkt_data)
    }
 }
 
-void tcp(const u_char * pkt_data, uint16_t * cs_arr, bpf_u_int32 len)
+void tcp(const u_char * pkt_data, uint16_t * cs_arr)
 {
    struct ip_header * iph = (struct ip_header *)(pkt_data
       + sizeof(struct ethernet_header));
@@ -354,7 +355,7 @@ void tcp(const u_char * pkt_data, uint16_t * cs_arr, bpf_u_int32 len)
    printf("\t\tWindow Size: %d\n", ntohs(tcph->window_size));
    
    printf("\t\tChecksum: ");
-   tcp_checksum(iph, tcph, len, cs_arr);
+   tcp_checksum(iph, tcph, cs_arr);
    
 }
 
@@ -387,21 +388,23 @@ void print_src_port(uint16_t port)
 }
 
 void tcp_checksum(struct ip_header * iph, struct tcp_header * tcph, 
-   uint16_t len, uint16_t * cs_arr)
+   uint16_t * cs_arr)
 {
    struct pseudo_header ph;
    
    uint16_t answer = 0;
    uint16_t * cs_ptr = (uint16_t *)&ph;
-   len = ntohs(iph->total_length) - ((iph->version_header_length & 0x0f) * 4);   
+   uint32_t len = ntohs(iph->total_length) - ((iph->version_header_length & 0x0f) * 4);   
+   
+   /*Copy data into the pseudo heaader*/
    ph.reserved = 0;
    memcpy(ph.source_ip, iph->source_ip, SENDER_IP);
    memcpy(ph.destination_ip, iph->destination_ip, TARGET_IP);
    ph.protocol = iph->protocol;
    ph.tcp_segment_length = htons(len);//size of the tcp header + what follows the tcp header
 
+   /*Copy the pseudo header and tcp segment into cs_arr*/
    memcpy(cs_arr, &ph, sizeof(struct pseudo_header));
-   
    cs_ptr = (uint16_t *)tcph;
    memcpy((cs_arr + sizeof(struct pseudo_header)/2), cs_ptr, len);
 
