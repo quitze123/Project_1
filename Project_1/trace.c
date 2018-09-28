@@ -20,6 +20,12 @@
 #define ICMP 0x01
 #define UDP 0x11
 #define TCP 0x06
+#define SSH 22
+#define HTTP 80
+#define TELNET 23
+#define FTP 21
+#define POP3 110
+#define SMTP 25 
 #define ICMP_REQUEST 0x08
 #define ICMP_REPLY 0x00
 #define REQUEST 0x0001
@@ -27,8 +33,8 @@
 #define SYN 0x2
 #define RST 0x4
 #define FIN 0x1
-#define PSEUDO_HEADER 12 /*Pseudo header is 12 bytes*/
-
+#define PSEUDO_HEADER 12
+#define MIN_SIZE_PACKET 60 /*after 4 bytes have been stripped off*/
 
 struct ethernet_header
 {
@@ -96,6 +102,14 @@ struct pseudo_header
    uint16_t tcp_segment_length;
 } __attribute__((packed));
 
+struct udp_header
+{
+   uint16_t source_port;
+   uint16_t destination_port;
+   uint16_t length;
+   uint16_t checksum;
+} __attribute__((packed));
+
 void usage(char * argv)
 {
    printf("Usage : %s PCAP_FILE\n", argv);
@@ -119,9 +133,12 @@ uint16_t ethernet(const u_char * pkt_data);
 void arp(const u_char * pkt_data);
 uint8_t ip(const u_char * pkt_data, uint8_t * pseudo_header);
 void icmp(const u_char * pkt_data);
-void tcp(const u_char * pkt_data);
+void tcp(const u_char * pkt_data, uint16_t * cs_arr, bpf_u_int32 len);
 void check_flag(uint32_t data, uint16_t flag);
-void tcp_checksum(struct ip_header * iph, struct tcp_header * tcph);
+void tcp_checksum(struct ip_header * iph, struct tcp_header * tcph, 
+   uint16_t len, uint16_t * cs_arr);
+void print_src_port(uint16_t port);
+void udp(const u_char * pkt_data);
 
 int main(int argc, char ** argv)
 {
@@ -152,6 +169,8 @@ void run(pcap_t * pcap_ptr)
    uint8_t pseudo_header[PSEUDO_HEADER];
    uint8_t protocol = -1;   
 
+   uint16_t cs_arr[5000];
+
    while(pcap_next_ex(pcap_ptr, &pkt_header, &pkt_data) == 1)
    {
       pkt_num++;
@@ -181,10 +200,14 @@ void run(pcap_t * pcap_ptr)
       }
       else if(protocol == TCP)
       {
-         tcp(pkt_data);
+         tcp(pkt_data, cs_arr, pkt_header->len);
          protocol = -1;
       }
-      //break;
+      else if(protocol == UDP)
+      {
+         udp(pkt_data);
+         protocol = -1;
+      }
    }
 }
 
@@ -236,7 +259,6 @@ uint8_t ip(const u_char * pkt_data, uint8_t * pseudo_header)
    uint8_t header_length = (iph->version_header_length & 0x0f) * 4;
 
    printf("\n\tIP Header\n");
-   //printf("\t\tTOS: 0x%x\n", iph->ds_ecn >> 2);
    printf("\t\tTOS: 0x%x\n", iph->ds_ecn);
    printf("\t\tTTL: %d\n", iph->time_to_live);
    printf("\t\tProtocol: ");
@@ -256,6 +278,7 @@ uint8_t ip(const u_char * pkt_data, uint8_t * pseudo_header)
    {
       printf("Unknown\n");
    }
+   
    printf("\t\tChecksum: ");
    if(in_cksum(temp_ptr_iph, header_length) == 0)
    {
@@ -265,6 +288,7 @@ uint8_t ip(const u_char * pkt_data, uint8_t * pseudo_header)
    {
       printf("Incorrect (0x%x)\n", ntohs(iph->header_checksum));
    }
+   
    printf("\t\tSender IP: %s\n", 
       inet_ntoa(*((struct in_addr *)(iph->source_ip))));
    printf("\t\tDest IP: %s\n",
@@ -299,82 +323,89 @@ void icmp(const u_char * pkt_data)
    }
 }
 
-void tcp(const u_char * pkt_data)
+void tcp(const u_char * pkt_data, uint16_t * cs_arr, bpf_u_int32 len)
 {
    struct ip_header * iph = (struct ip_header *)(pkt_data
       + sizeof(struct ethernet_header));
-   uint8_t ip_header_length = (iph->version_header_length & 0x0f) * 4;
+   uint16_t ip_header_length = (iph->version_header_length & 0x0f) * 4;
 
    struct tcp_header * tcph = (struct tcp_header *)(pkt_data
       + sizeof(struct ethernet_header) + ip_header_length);
 
    uint16_t data = ntohs(tcph->data_offset_reserved_ns_cwr_ece_urg_ack_psh_rst_syn_fin);
-
+   
    printf("\n\tTCP Header\n");
-   printf("\t\tSource port: %d\n", ntohs(tcph->source_port));
-   printf("\t\tDest Port: %d\n", ntohs(tcph->destination_port));
+
+   printf("\t\tSource Port:  ");
+   print_src_port(ntohs(tcph->source_port));
+   printf("\t\tDest Port:  ");
+   print_src_port(ntohs(tcph->destination_port));
+
    printf("\t\tSequence Number: %u\n", ntohl(tcph->sequence_number));
    printf("\t\tACK Number: %u\n",  ntohl(tcph->ack_num));
+   
    printf("\t\tSYN Flag: ");
    check_flag(data, SYN);
    printf("\t\tRST Flag: ");
    check_flag(data, RST);
    printf("\t\tFIN Flag: ");
    check_flag(data, FIN);
+   
    printf("\t\tWindow Size: %d\n", ntohs(tcph->window_size));
+   
    printf("\t\tChecksum: ");
-   tcp_checksum(iph, tcph);
+   tcp_checksum(iph, tcph, len, cs_arr);
    
 }
 
-void tcp_checksum(struct ip_header * iph, struct tcp_header * tcph)
+void print_src_port(uint16_t port)
+{
+   if(port == HTTP)
+   {
+      printf("HTTP\n");
+   }
+   else if(port == TELNET)
+   {
+      printf("Telnet\n");
+   }
+   else if(port == FTP)
+   {
+      printf("FTP\n");
+   }
+   else if(port == POP3)
+   {
+      printf("POP3\n");
+   }
+   else if(port == SMTP)
+   {
+      printf("SMTP\n");
+   }
+   else
+   {
+      printf("%d\n", port);
+   }
+}
+
+void tcp_checksum(struct ip_header * iph, struct tcp_header * tcph, 
+   uint16_t len, uint16_t * cs_arr)
 {
    struct pseudo_header ph;
    
-   uint16_t data = ntohs(tcph->data_offset_reserved_ns_cwr_ece_urg_ack_psh_rst_syn_fin);
-   uint16_t tcp_header_len = (data >> 12) * 4;
    uint16_t answer = 0;
    uint16_t * cs_ptr = (uint16_t *)&ph;
-
-   int i = 0;
-
-   uint16_t temp[5000];
-
+   len = ntohs(iph->total_length) - ((iph->version_header_length & 0x0f) * 4);   
    ph.reserved = 0;
-   
    memcpy(ph.source_ip, iph->source_ip, SENDER_IP);
-   
    memcpy(ph.destination_ip, iph->destination_ip, TARGET_IP);
-
    ph.protocol = iph->protocol;
-   ph.tcp_segment_length = htons(tcp_header_len);//size of the tcp header + what follows the tcp header
+   ph.tcp_segment_length = htons(len);//size of the tcp header + what follows the tcp header
 
-   memcpy(temp, &ph, sizeof(struct pseudo_header));
-   /*
-   printf("ph.tcp_segment_length %d %x", ntohs(ph.tcp_segment_length),ntohs(ph.tcp_segment_length));
-   
-   while(i < 6)
-   {
-      printf("\n%x\n\n", temp[i]);
-      i++;
-   }
-   */
+   memcpy(cs_arr, &ph, sizeof(struct pseudo_header));
    
    cs_ptr = (uint16_t *)tcph;
-   memcpy((temp + sizeof(struct pseudo_header)/2), cs_ptr, tcp_header_len);
+   memcpy((cs_arr + sizeof(struct pseudo_header)/2), cs_ptr, len);
 
-   i = 0;
-   while(i < sizeof(struct pseudo_header)/2 + tcp_header_len/2)
-   {
-      printf("\n%x\n\n", temp[i]);
-      i++;
-   }
-   
-   printf("sizeof(struct pseudo_header)/2+ tcp_header_len/2 %lu\n",sizeof(struct pseudo_header)/2+ tcp_header_len/2);
-   
-   answer = in_cksum(temp, sizeof(struct pseudo_header)+ tcp_header_len); 
-   //answer = in_cksum(temp, 20);
-   //printf("\nanswer : %x\n\n", answer);
+   answer = in_cksum(cs_arr, sizeof(struct pseudo_header)+ len); 
    if(answer == 0)
    {
       printf("Correct");
@@ -383,7 +414,7 @@ void tcp_checksum(struct ip_header * iph, struct tcp_header * tcph)
    {
       printf("Incorrect");
    } 
-   printf("(0x%x)\n", tcph->checksum);
+   printf(" (0x%x)\n", ntohs(tcph->checksum));
 
 }
 
@@ -398,3 +429,22 @@ void check_flag(uint32_t data, uint16_t flag)
       printf("No\n");
    }
 }
+
+void udp(const u_char * pkt_data)
+{
+   struct ip_header * iph = (struct ip_header *)(pkt_data
+      + sizeof(struct ethernet_header));
+   uint16_t ip_header_length = (iph->version_header_length & 0x0f) * 4;
+
+   struct udp_header * udph = (struct udp_header *)(pkt_data
+      + sizeof(struct ethernet_header) + ip_header_length);
+   printf("\n\tUDP Header\n");
+   
+   printf("\t\tSource Port:  ");
+   print_src_port(ntohs(udph->source_port));
+
+   printf("\t\tDest Port:  ");
+   print_src_port(ntohs(udph->destination_port));
+   
+}
+
