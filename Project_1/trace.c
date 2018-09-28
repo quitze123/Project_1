@@ -367,7 +367,7 @@ void print_src_port(uint16_t port)
    }
    else if(port == TELNET)
    {
-      printf("Telnet\n");
+      printf("TELNET\n");
    }
    else if(port == FTP)
    {
@@ -450,4 +450,3 @@ void udp(const u_char * pkt_data)
    print_src_port(ntohs(udph->destination_port));
    
 }
-
